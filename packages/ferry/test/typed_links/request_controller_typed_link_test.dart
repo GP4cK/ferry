@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:async/async.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:ferry/ferry.dart';
 import 'package:ferry/src/request_controller_typed_link.dart';
 import 'package:ferry_test_graphql2/queries/__generated__/review_by_id.data.gql.dart';
@@ -499,6 +500,57 @@ void main() {
       );
 
       expect(stream, emitsInOrder([emitsDone]));
+    });
+  });
+
+  test('should not leave pending timers after stream is cancelled', () {
+    fakeAsync((time) {
+      final requestController = StreamController<OperationRequest>.broadcast();
+      final link = RequestControllerTypedLink(requestController);
+
+      final req = JsonOperationRequest(
+        operation: Operation(
+          document: gql.parseString('query GetData { data { id } }'),
+        ),
+        requestId:
+            'test-request', // Use requestId so second request goes to same stream
+        vars: {},
+        fetchPolicy: FetchPolicy.NetworkOnly,
+      );
+
+      final res = OperationResponse(
+        operationRequest: req,
+        data: {
+          'data': {'id': '1'}
+        },
+        dataSource: DataSource.Link,
+      );
+
+      // Start listening to the request
+      final subscription =
+          link.request(req, (req) => Stream.value(res)).listen((_) {});
+
+      // Allow the first request to be processed (sets up `prev`)
+      time.elapse(Duration.zero);
+
+      // Trigger a SECOND request - this is when doOnData fires with prev != null
+      // and creates the problematic Future.delayed timer
+      requestController.add(req);
+
+      // Allow the second request to start processing (but not the Future.delayed to complete)
+      time.flushMicrotasks();
+
+      subscription.cancel();
+
+      // This should NOT leave any pending timers
+      expect(
+        time.pendingTimers,
+        isEmpty,
+        reason: 'RequestControllerTypedLink should not leave pending timers '
+            'after the stream is cancelled. '
+            'The Future.delayed(Duration.zero, ...) in doOnData creates '
+            'an uncancellable timer that outlives the stream lifecycle.',
+      );
     });
   });
 }
