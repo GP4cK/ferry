@@ -57,6 +57,7 @@ class RequestControllerTypedLink extends TypedLink {
     if (stream == null) {
       // If no stream has been cached for this request, create a new one.
       ValueStream<OperationResponse<TData, TVars>>? prev;
+      StreamSubscription<OperationResponse<TData, TVars>>? keepAliveSub;
       var initial = true;
       var requestStream = requestController.stream
           .whereType<OperationRequest<TData, TVars>>()
@@ -69,8 +70,8 @@ class RequestControllerTypedLink extends TypedLink {
         (_) {
           /// Temporarily add a listener so that [prev] doesn't shut down when
           /// switchMap is updating the stream.
-          final sub = prev?.listen(null);
-          Future.delayed(Duration.zero, () => sub?.cancel());
+          keepAliveSub?.cancel();
+          keepAliveSub = prev?.listen(null);
         },
       );
       //Only use the first instance of the request stream for subscriptions, to ensure that a possible .done event is propagated.
@@ -99,7 +100,15 @@ class RequestControllerTypedLink extends TypedLink {
                     graphqlErrors: response.graphqlErrors,
                   ),
                 );
-          return prev = stream.shareValue();
+          // Cancel the keep-alive subscription after the new stream is
+          // listened to (via doOnListen). We use scheduleMicrotask to ensure
+          // this happens after CombineLatestStream has subscribed to prev.
+          return (prev = stream.shareValue()).doOnListen(() {
+            scheduleMicrotask(() {
+              keepAliveSub?.cancel();
+              keepAliveSub = null;
+            });
+          });
         },
       ).doOnListen(
         () {
@@ -109,7 +118,9 @@ class RequestControllerTypedLink extends TypedLink {
           initial = false;
         },
       ).doOnCancel(() {
-        // Once the stream is not listened to anymore, remove it from the cache.
+        // Cancel any keep-alive subscription and remove from cache.
+        keepAliveSub?.cancel();
+        keepAliveSub = null;
         _cachedStreams.remove(request);
       });
       _cachedStreams[cachedRequest] = stream;
